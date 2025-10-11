@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: stock-lstm-flask
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn -b 0.0.0.0:$PORT wsgi:app --workers=1 --threads=4 --timeout=120"
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: API_KEY
+        value: change-me
+      - key: MODELS_DIR
+        value: models
+      # opcionais:
+      # - key: ADMIN_USER
+      #   value: admin
+      # - key: ADMIN_PASS
+      #   value: supersecreto
+      # - key: TF_ENABLE_ONEDNN_OPTS
+      #   value: "0"
+    disk:
+      name: models-disk
+      mountPath: /opt/render/project/src/models
+      sizeGB: 1
+    # persistir o SQLite:
+    extraDisks:
+      - name: instance-disk
+        mountPath: /opt/render/project/src/instance
+        sizeGB: 1
+
+cronJobs:
+  - name: daily-update-train
+    schedule: "0 9 * * *"
+    command: >
+      curl -s -X POST "$RENDER_EXTERNAL_URL/api/tasks/daily_update"
+      -H "X-API-KEY: $API_KEY"
+      -H "Content-Type: application/json"
+      -d '{"ticker":"AAPL"}'
