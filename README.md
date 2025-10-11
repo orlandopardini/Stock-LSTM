@@ -10,6 +10,10 @@ Este repositório implementa um **pipeline completo de previsão de séries fina
 
 > **Status**: pronto para rodar localmente e para deploy no Render. O banco SQLite e o diretório `models/` devem ser persistidos em produção.
 
+<img width="1886" height="949" alt="image" src="https://github.com/user-attachments/assets/9095e0a1-cc25-44fe-a29f-7db342a48f4f" />
+<img width="1885" height="678" alt="image" src="https://github.com/user-attachments/assets/339f1315-1796-4aa6-ac6c-b5136b68a933" />
+<img width="1889" height="483" alt="image" src="https://github.com/user-attachments/assets/0388f1fd-c2c3-40d9-acb7-b74d6aa8cd02" />
+
 ---
 
 ## Sumário
