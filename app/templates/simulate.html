@@ -1,0 +1,75 @@
+{% extends 'base.html' %}
+{% block title %}Simular Data — Stock LSTM{% endblock %}
+{% block content %}
+<h3>Simular Data</h3>
+
+<!-- Toolbar topo -->
+<div style="margin-bottom:12px; display:flex; gap:8px;">
+  <!-- Link direto para a home -->
+  <a class="btn btn-alt" href="{{ url_for('web.home') }}">&larr; Voltar ao início</a>
+
+  <!-- Fallback (volta histórico) caso a rota mude -->
+  <button type="button" class="btn" onclick="try{ history.back(); }catch(e){ window.location='{{ url_for('web.home') }}'; }">
+    Voltar (histórico)
+  </button>
+</div>
+
+<form id="sim-form" onsubmit="event.preventDefault(); simulate();">
+  <label for="sim_ticker">Ticker:</label>
+  <input id="sim_ticker" name="ticker" type="text" value="AAPL" />
+
+  <label for="sim_date" style="margin-left:8px;">Data alvo (AAAA-MM-DD):</label>
+  <input id="sim_date" name="date" type="date" />
+
+  <span style="margin:0 8px">ou</span>
+
+  <label for="sim_steps">Passos (dias úteis):</label>
+  <input id="sim_steps" name="steps" type="number" min="1" placeholder="ex.: 60" />
+
+  <button type="submit" style="margin-left:8px;">Simular</button>
+</form>
+
+<div id="result" style="margin-top:12px;"></div>
+
+<script>
+async function simulate(){
+  const t = (document.getElementById('sim_ticker').value || 'AAPL').toUpperCase();
+  const d = document.getElementById('sim_date').value;
+  const s = document.getElementById('sim_steps').value;
+
+  // usa /api/simulate quando há "steps" ou "date"; senão cai no /api/predict (1 dia)
+  const params = new URLSearchParams({ ticker: t });
+  let url = '/api/predict';
+  if (s || d){
+    url = '/api/simulate';
+    if (s) params.set('steps', s);
+    if (d) params.set('date', d);
+  } else {
+    // /api/predict aceita ?ticker=... e opcionalmente ?date=...
+    if (d) params.set('date', d);
+  }
+
+  const res = await fetch(`${url}?${params.toString()}`);
+  const js  = await res.json();
+
+  if (!res.ok){
+    document.getElementById('result').innerHTML =
+      `<p style="color:#f66">Erro: ${js.error || res.statusText}</p>`;
+    return;
+  }
+
+  if (url === '/api/simulate'){
+    const rows = (js.series||[]).map(r => `<tr><td>${r.date}</td><td>${r.pred.toFixed(2)}</td></tr>`).join('');
+    document.getElementById('result').innerHTML = `
+      <p><b>${t}</b> de ${js.from} até ${js.to} — ${js.steps} passos (modelo: ${js.version})</p>
+      <table class="table">
+        <thead><tr><th>Data</th><th>Previsto</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  } else {
+    document.getElementById('result').innerHTML =
+      `<p>Predição 1 dia para <b>${t}</b> ${js.date_cutoff ? '(até '+js.date_cutoff+')' : ''}: <b>${(js.pred||0).toFixed(2)}</b> (${js.model})</p>`;
+  }
+}
+</script>
+{% endblock %}

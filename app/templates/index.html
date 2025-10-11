@@ -1,0 +1,545 @@
+{% extends 'base.html' %}
+{% block content %}
+
+<style>
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+  .toolbar input, .toolbar button{padding:8px;border-radius:8px;border:1px solid #334;background:#0f1424;color:#e6eefc}
+  .toolbar button{border:0;background:#1e90ff;cursor:pointer}
+  .grid{display:grid;grid-template-columns:1fr;gap:16px}
+  @media(min-width:1000px){.grid{grid-template-columns:1fr 1fr}}
+  .card{background:#0f1424;border:1px solid #223;border-radius:16px;padding:12px;box-shadow:0 4px 20px rgba(0,0,0,.2)}
+  .log{font-family:ui-monospace,Menlo,Consolas,monospace;background:#0b0f1a;border-radius:12px;padding:8px;max-height:180px;overflow:auto;border:1px solid #223}
+  .ok{color:#7CFC9B}
+  .err{color:#ff6b6b}
+</style>
+
+<form class="toolbar" id="panel" onsubmit="event.preventDefault();">
+  <label for="ticker">Ticker</label>
+  <select id="ticker"></select>
+  <button type="button" class="btn btn-icon" onclick="reloadTickers()" title="Recarregar lista" aria-label="Recarregar lista">↻</button>
+  <label for="start">Início</label>
+  <input id="start" type="date" value="2015-01-01"/>
+  <button type="button" class="btn btn-primary" onclick="doTrain(false)">Treinar (rápido)</button>
+  <button type="button" class="btn btn-primary" onclick="doTrain(true)">Retreinar (forçar)</button>
+  <button type="button" class="btn btn-primary" onclick="loadAll()">Atualizar Gráficos</button>
+  <span id="timer-train-fast" class="timer" aria-live="polite"></span>
+</form>
+
+
+<div class="grid">
+  <div class="card">
+    <h3>Preço em U$ (30 dias)</h3>
+    <div id="chart_backtest" style="height:380px;"></div>
+  </div>
+  <div class="card">
+    <h3>MAE de 20 dias + Dispersão</h3>
+    <div id="chart_error" style="height:380px;"></div>
+  </div>
+  <div class="card">
+    <h3>Métricas do modelo (histórico)</h3>
+    <div id="chart_metrics" style="height:380px;"></div>
+  </div>
+  <div class="card">
+    <h3>Série de Fechamento de 365 dias</h3>
+    <div id="chart_close" style="height:380px;"></div>
+  </div>
+
+  <div class="card card-logs">
+    <h3>Logs</h3>
+    <div id="log" class="log" style="max-height:100px;overflow:auto;"></div>
+  </div>
+</div>
+
+<div class="card card-models">
+  <h3>Modelos (5) — Vencedor Atual</h3>
+  <div id="best_model"></div>
+  <div id="models_table" style="max-height:260px;overflow:auto;"></div>
+</div>
+
+<script>
+  // Lê variáveis CSS do :root
+  function cssVar(name, fallback) {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name);
+    return v && v.trim() ? v.trim() : fallback;
+  }
+
+  // Monta um layout base com a sua paleta
+  function plotThemeLayout(extra = {}) {
+  const L = {
+    paper_bgcolor: 'transparent',
+    plot_bgcolor: cssVar('--surface', '#0e1620'),
+    font: { color: cssVar('--on-surface', '#dfe8f4'), family: getComputedStyle(document.documentElement).getPropertyValue('--ui-font').trim() || 'Inter, "Segoe UI", system-ui, sans-serif' },
+    xaxis: { gridcolor: cssVar('--grid', 'rgba(255,255,255,.06)'), zeroline:false, linecolor:'transparent', tickcolor:'transparent' },
+    yaxis: { gridcolor: cssVar('--grid', 'rgba(255,255,255,.06)'), zeroline:false, linecolor:'transparent', tickcolor:'transparent' },
+    margin: { t: 20 },
+    legend:{ orientation:'h', x:0.5, xanchor:'center' }
+  };
+  return Object.assign(L, extra);
+}
+</script>
+
+
+<script>
+// ---------- Utils ----------
+
+// ==== cores ====
+const GREEN_DARK  = '#6699cc';
+const GREEN_MED   = '#35a853';
+const GREEN_LIGHT = '#9be7a2';
+const RED_SOFT   = '#ff7b7b';
+const RED_LIGHT   = 'rgba(255, 82, 82, 0.18)';
+const RED_SOLID   = '#ff5252';
+
+// média móvel e desvio padrão móvel (sobre vetor numérico)
+function rollingMeanStd(arr, win=20){
+  const mean = [], std = [];
+  for(let i=0;i<arr.length;i++){
+    const s = Math.max(0, i-win+1);
+    const slice = arr.slice(s, i+1);
+    const m = slice.reduce((a,b)=>a+b,0)/slice.length;
+    const v = slice.reduce((a,b)=>a+(b-m)**2,0)/slice.length;
+    mean.push(m);
+    std.push(Math.sqrt(v));
+  }
+  return {mean, std};
+}
+
+// próximo dia útil simples (p/ marcar ponto da previsão)
+function nextBizDateStr(isoDateStr){
+  const d = new Date(isoDateStr + 'T00:00:00');
+  const add = (n)=>{ d.setDate(d.getDate()+n); };
+  do { add(1); } while([0,6].includes(d.getDay())); // pula domingo(0) e sábado(6)
+  return d.toISOString().slice(0,10);
+}
+
+/* Cronômetro robusto: re-busca o span a cada tick e inicia já em 00:00 */
+let __chrono = { h:null, t0:0, targetId:null };
+
+function startChrono(spanId){
+  if (__chrono.h) { clearInterval(__chrono.h); __chrono.h = null; }
+  __chrono.t0 = performance.now();
+  __chrono.targetId = spanId;
+
+  const paint = (secs) => {
+    const el = document.getElementById(__chrono.targetId);
+    if (!el) return;
+    const mm = String(Math.floor(secs/60)).padStart(2,'0');
+    const ss = (secs%60).toFixed(1).padStart(4,'0'); // <-- décimo
+    el.textContent = `⏱ ${mm}:${ss}`;
+  };
+
+  paint(0);
+  __chrono.h = setInterval(() => {
+    const dt = (performance.now() - __chrono.t0) / 1000;
+    paint(dt);
+  }, 100);
+
+  return {
+    stop(finalSec=null){
+      if (__chrono.h) { clearInterval(__chrono.h); __chrono.h = null; }
+      if (finalSec === null) finalSec = (performance.now() - __chrono.t0) / 1000;
+      // congela com 1 casa
+      const el = document.getElementById(__chrono.targetId);
+      if (el){
+        const mm = String(Math.floor(finalSec/60)).padStart(2,'0');
+        const ss = (finalSec%60).toFixed(1).padStart(4,'0');
+        el.textContent = `⏱ ${mm}:${ss}`;
+      }
+    }
+  };
+}
+
+// <section id="vscode-hero" aria-hidden="true">
+//   <div class="vscode-hero__gradient"></div>
+//   <canvas id="vscode-hero-canvas"></canvas>
+//   <div id="vscode-hero-grid"></div>
+// </section>
+
+async function loadJSON(url, init){
+  const r = await fetch(url, init);
+  const text = await r.text();
+  try { const j = JSON.parse(text); if(!r.ok) throw new Error(j.error || text); return j; }
+  catch(_) { if(!r.ok) throw new Error(text); return JSON.parse(text); }
+}
+function log(msg, kind='ok'){
+  const el = document.getElementById('log');
+  const ts = new Date().toLocaleTimeString();
+  el.innerHTML = `<div class="${kind}">[${ts}] ${msg}</div>` + el.innerHTML;
+}
+function toTrace(x, y, name){ return { x, y, name, type:'scatter', mode:'lines' }; }
+function rollingAbsError(y, yhat, win=20){
+  const out=[]; for(let i=0;i<y.length;i++){ const s=Math.max(0,i-win+1);
+    let acc=0,n=0; for(let j=s;j<=i;j++){ acc+=Math.abs(y[j]-yhat[j]); n++; }
+    out.push(acc/Math.max(1,n));
+  } return out;
+}
+
+// Aceita tanto array de objetos [{date,y_true,y_pred}] quanto objeto {dates,y_true,y_pred}
+function pickSeries(back){
+  const s = back.series;
+  if (Array.isArray(s)) {
+    return {
+      dates: s.map(r => r.date || r.dt || r[0]),
+      y_true: s.map(r => (r.y_true ?? r.real ?? r.true ?? r[1])),
+      y_pred: s.map(r => (r.y_pred ?? r.pred  ?? r.previsto ?? r[2])),
+    };
+  }
+  return {
+    dates: s?.dates || [],
+    y_true: s?.y_true || s?.real || [],
+    y_pred: s?.y_pred || s?.pred || s?.previsto || [],
+  };
+}
+
+// ---------- Modelos (cards/tabela) ----------
+async function loadModels(){
+  const t = document.getElementById('ticker').value || 'NVDA';
+  // vencedor
+  try{
+    const b = await loadJSON(`/api/models/best?ticker=${t}`);
+    document.getElementById('best_model').innerHTML =
+      `<b>${b.model_name} (ID ${b.model_id})</b><br/>
+       versão: ${b.version}<br/>
+       registrado em: ${b.registered_at}<br/>
+       RMSE: ${b.metrics.rmse.toFixed(4)} • MAE: ${b.metrics.mae.toFixed(4)} • R²: ${b.metrics.r2?.toFixed(3) ?? '—'} • ACC: ${(b.metrics.accuracy*100).toFixed(1)}%`;
+  }catch{
+    document.getElementById('best_model').innerText = 'Sem vencedor — treine primeiro.';
+  }
+
+  // tabela
+  const s = await loadJSON(`/api/models/summary?ticker=${t}`);
+  const rows = (s.models || []).slice(0, 20).map(m => `
+    <tr ${m.is_winner ? 'style="background:#112b;"' : ''}>
+      <td>${m.is_winner ? '🏆' : ''}</td>
+      <td>${m.model_id}</td>
+      <td>${m.model_name}</td>
+      <td>${m.version}</td>
+      <td>${m.rmse?.toFixed?.(4) ?? ''}</td>
+      <td>${m.mae?.toFixed?.(4) ?? ''}</td>
+      <td>${m.mape?.toFixed?.(2) ?? ''}%</td>
+      <td>${m.r2?.toFixed?.(3) ?? ''}</td>
+      <td>${(m.accuracy*100||0).toFixed(1)}%</td>
+      <td>${m.registered_at}</td>
+    </tr>`).join('');
+  document.getElementById('models_table').innerHTML =
+    `<table><thead><tr>
+      <th></th><th>ID</th><th>Arquitetura</th><th>Versão</th>
+      <th>RMSE</th><th>MAE</th><th>MAPE</th><th>R²</th><th>ACC</th><th>Registrado</th>
+     </tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+// pega sub‐séries pelos últimos N dias
+function sliceLastDays(dates, arrays, days){
+  const toDate = (d)=> new Date(d + (d.length === 10 ? "T00:00:00" : ""));
+  const last = toDate(dates[dates.length - 1]);
+  const cutoff = new Date(last);
+  cutoff.setDate(cutoff.getDate() - days);
+  const keep = dates.map((d,i)=> ({i, dt: toDate(d)})).filter(o => o.dt >= cutoff).map(o=>o.i);
+  const idx = new Set(keep);
+  const dates2 = dates.filter((_,i)=>idx.has(i));
+  const arrays2 = arrays.map(arr => arr.filter((_,i)=>idx.has(i)));
+  return [dates2, ...arrays2];
+}
+
+
+// ---------- Backtest / Gráficos ----------
+async function loadAll(){
+  const t = (document.getElementById('ticker').value || 'NVDA').toUpperCase();
+  let seriesForCharts = null;   // <<< hoist para usar nos 3 gráficos
+  // 1) Backtest
+  try{
+    const back = await loadJSON(`/api/backtest?ticker=${t}&window=180`);
+    const s = pickSeries(back);
+    if (!s.dates.length || !s.y_true.length || !s.y_pred.length) throw new Error('Sem dados para plotar');
+    seriesForCharts = s;  // <<< deixar acessível para o gráfico de “Série de Fechamento”
+
+
+    // GRÁFICO 1 ==== PREÇO — Real vs Previsto (últimos 30 dias) ====
+    const rb = rollingMeanStd(s.y_true, 20);
+
+    // fatiar para 30 dias
+    let [dx, ytrue30, ypred30, mean30, std30] = sliceLastDays(
+      s.dates,
+      [s.y_true, s.y_pred, rb.mean, rb.std],
+      30
+    );
+    const upper = mean30.map((m,i)=> m + std30[i]);
+    const lower = mean30.map((m,i)=> m - std30[i]);
+
+    const ACCENT = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#46c8ff';
+
+    const trReal = { x: dx, y: ytrue30, type:'scatter', mode:'lines',
+      name:'Real (U$)', line:{color: ACCENT, width: 2} };
+
+    const trPred = { x: dx, y: ypred30, type:'scatter', mode:'lines',
+      name:'Previsto (U$)', line:{ color: '#ff7b7b', width: 2 } };
+
+    const trBandLower = { x: dx, y: lower, type:'scatter', mode:'lines',
+      line:{color:'transparent'}, showlegend:false, hoverinfo:'skip' };
+
+    const trBandUpper = { x: dx, y: upper, type:'scatter', mode:'lines',
+      fill:'tonexty', fillcolor:'rgba(70,200,255,0.10)', line:{color:'transparent'},
+      name:'Média ± DP' };
+
+    const priceTraces = [trBandLower, trBandUpper, trReal, trPred];
+
+    // ponto do próximo dia útil (vermelho)
+    try{
+      let pd = null;
+      try { pd = await loadJSON(`/api/predict?ticker=${t}`); } catch(_){}
+      const nextX = (pd && (pd.date_next || pd.date || pd.date_cutoff))
+                    || nextBizDateStr(dx[dx.length-1]);
+      const nextY = (pd && (pd.pred ?? pd.y_pred ?? pd.value))
+                    || ypred30[ypred30.length-1];
+
+      priceTraces.push({
+        x:[nextX], y:[nextY], mode:'markers', name:'Próximo dia (U$)',
+        marker:{ color:'#e74c3c', size:8 }, hovertemplate:'Próximo dia (%{x}, %{y:.2f})<extra></extra>'
+      });
+    }catch(_){ /* segue sem o ponto se der erro */ }
+
+    Plotly.react(
+      'chart_backtest',
+      priceTraces,
+      plotThemeLayout({ yaxis: { title: { text: 'Preço (U$)' } }, legend:{orientation:'h', x:0.5, xanchor:'center'}, xaxis:{type:'date'} })
+    );
+
+
+
+
+
+    // ==== ERRO — Janela tripla: MAE rolling, Dispersão y vs ŷ, Resíduos ====
+    // ==== ERRO — Janela dupla: MAE rolling (20) + Dispersão y vs ŷ ====
+    const mae20 = rollingAbsError(s.y_true, s.y_pred, 20);
+
+    // 1) MAE rolling (20)
+    const trMae = {...toTrace(s.dates, mae20, 'MAE')};
+    trMae.line = {color: GREEN_MED, width: 2};
+
+    // 2) Dispersão y_true vs y_pred com linha y=x
+    // 2) Dispersão y_true vs y_pred com cores por distância da diagonal
+    const diffs = s.y_true.map((yv,i)=> Math.abs(yv - s.y_pred[i]));
+    const maeGlobal = diffs.reduce((a,b)=>a+b,0)/diffs.length;
+
+    // limiares: perto ≤ 0.5*MAE, médio ≤ 1.5*MAE, longe > 1.5*MAE
+    const nearT = 0.5 * maeGlobal, farT = 1.5 * maeGlobal;
+    const colors = diffs.map(d => d <= nearT ? ACCENT : (d <= farT ? '#ffd166' : '#ff6b6b'));
+
+    const scatterPts = {
+      x: s.y_true, y: s.y_pred, type:'scatter', mode:'markers',
+      name:'ŷ vs y',
+      marker:{ color: colors, size:6, line:{color:'#0f1424', width:0.5} },
+      xaxis:'x2', yaxis:'y2',
+      hovertemplate: 'y=%{x:.2f}<br>ŷ=%{y:.2f}<br>|erro|='+ '%{customdata:.2f}' + '<extra></extra>',
+      customdata: diffs
+    };
+
+    const minxy = Math.min(Math.min(...s.y_true), Math.min(...s.y_pred));
+    const maxxy = Math.max(Math.max(...s.y_true), Math.max(...s.y_pred));
+
+    const diag = {
+      x:[minxy,maxxy], y:[minxy,maxxy], type:'scatter', mode:'lines',
+      name:'y = x', line:{color:'rgba(200,220,235,.35)', width:1, dash:'dot'},
+      hoverinfo:'skip', xaxis:'x2', yaxis:'y2'
+    };
+
+    Plotly.react('chart_error', [trMae, scatterPts, diag],
+      plotThemeLayout({
+        grid:{rows:1, columns:2, pattern:'independent'},
+        yaxis:{title:'MAE'},
+        xaxis2:{title:'y (real)'},
+        yaxis2:{title:'ŷ (previsto)'},
+        legend:{orientation:'h', x:0.5, xanchor:'center'}
+      })
+    );
+
+
+
+
+    log(`Backtest OK ${t} | MAE=${(back.metrics.mae??0).toFixed(4)} RMSE=${(back.metrics.rmse??0).toFixed(4)} R²=${(back.metrics.r2??0).toFixed(3)} ACC=${(((back.metrics.accuracy??0))*100).toFixed(1)}%`, 'ok');
+  }catch(e){
+    Plotly.react('chart_backtest', [], {title:'Treine o modelo primeiro', margin:{t:40}});
+    Plotly.react('chart_error',   [], {title:'Sem dados suficientes',   margin:{t:40}});
+    log(`Backtest aviso: ${e.message}`, 'err');
+  }
+
+  // 2) Histórico de métricas
+  try{
+    const mh = await loadJSON(`/api/metrics/history?t=${Date.now()}&ticker=${t}`);
+    const when = mh.history.map(d => d.when || d.registered_at);
+    const mae  = mh.history.map(d => d.mae);
+    const rmse = mh.history.map(d => d.rmse);
+    const mape = mh.history.map(d => d.mape);
+    const r2   = mh.history.map(d => d.r2 ?? null);
+
+    const traces = [
+      {...toTrace(when, mae,  'MAE'),      xaxis:'x',  yaxis:'y'},
+      {...toTrace(when, rmse, 'RMSE'),     xaxis:'x2', yaxis:'y2'},
+      {...toTrace(when, mape, 'MAPE (%)'), xaxis:'x3', yaxis:'y3'},
+      {...toTrace(when, r2,   'R²'),       xaxis:'x4', yaxis:'y4'},
+    ];
+    Plotly.react('chart_metrics', traces, plotThemeLayout({ grid:{rows:2, columns:2, pattern:'independent'} }));
+
+  }catch(e){
+    Plotly.react('chart_metrics', [], {title:'Sem histórico de métricas', margin:{t:40}});
+  }
+
+
+  // 3) Série de Fechamento (Close) — verde + faixa vermelha distância
+try {
+  let x = [], y = [], yp = [];
+
+  if (seriesForCharts) {
+    x  = seriesForCharts.dates;
+    y  = seriesForCharts.y_true;
+    yp = seriesForCharts.y_pred || [];
+    // REMOVA o slice daqui
+  } else {
+    // fallback: só close histórico
+    const ser = await loadJSON(`/api/series?ticker=${t}&limit=800&nocache=${Date.now()}`);
+    x  = ser.data.map(d => d.date);
+    y  = ser.data.map(d => d.close);
+    yp = []; // sem previsto no fallback
+  }
+
+  // >>> AQUI <<< (aplica para os dois caminhos)
+  ;[x, y, yp] = sliceLastDays(x, [y, yp], 365);
+
+  const trClose = { x, y, type:'scatter', mode:'lines',
+    name:'Fechamento (U$)', line:{ color: GREEN_DARK, width: 2 } };
+
+  const traces = [trClose];
+
+  if (yp.length && yp.length === y.length) {
+    const trGapFill = { x, y: yp, type:'scatter', mode:'lines',
+      line:{ color:'transparent' }, fill:'tonexty', fillcolor: RED_LIGHT,
+      name:'distância (|y − ŷ|)', hoverinfo:'skip' };
+    const trPred2 = { x, y: yp, type:'scatter', mode:'lines',
+      name:'Previsto (U$)', line:{ color: RED_SOFT, width: 2 } };
+    traces.splice(1, 0, trGapFill);
+    traces.push(trPred2);
+  }
+
+  Plotly.react('chart_close', traces,
+    plotThemeLayout({ yaxis: { title: { text: 'Preço (U$)' } }, xaxis:{ type:'date' }, legend: { orientation: 'h', x: 0.5, xanchor: 'center' } })
+  );
+
+} catch (e) {
+  Plotly.react('chart_close', [], { title:'Sem série', margin:{ t:40 } });
+}
+
+
+  // 4) Atualiza cards/tabela
+  await loadModels();
+}
+
+// ---------- Ações ----------
+async function doUpdate(){
+  const t = (document.getElementById('ticker').value || 'NVDA').toUpperCase();
+  const s = document.getElementById('start').value || '2015-01-01';
+  try{
+    const j = await loadJSON(`/api/update_data?ticker=${encodeURIComponent(t)}&start=${encodeURIComponent(s)}`, {method:'POST'});
+    log(`Baixar dados: ${t} → adicionadas ${j.rows_added} linhas`, 'ok');
+    await loadAll();
+  }catch(e){ log(`Baixar dados ERRO: ${e.message}`, 'err'); }
+}
+
+
+async function doTrain(force=false){
+  const t = (document.getElementById('ticker').value || 'NVDA').toUpperCase();
+  const chrono = startChrono('timer-train-fast');
+
+  // tempo visual mínimo para não parecer travado quando reusar modelo
+  const MIN_VISUAL_MS = 1500;
+  const t0 = performance.now();
+
+  try{
+    const resp = await fetch('/api/train',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ ticker: t, epochs: 1, force })
+    });
+    const j = await resp.json();
+    if (!resp.ok) throw new Error(j.error || JSON.stringify(j));
+
+    // se reusou, garante que o cronômetro rode pelo menos 1.5s
+    if (j.reused) {
+      const spent = performance.now() - t0;
+      if (spent < MIN_VISUAL_MS) {
+        await new Promise(r => setTimeout(r, MIN_VISUAL_MS - spent));
+      }
+    }
+
+    // congela no tempo real reportado (ou no mínimo visual)
+    const dur = (typeof j.duration_sec === 'number')
+      ? Math.max(j.duration_sec, MIN_VISUAL_MS/1000)
+      : (MIN_VISUAL_MS/1000);
+    chrono.stop(dur);
+
+    // logs / refresh que você já tinha
+    const w = j.winner || {};
+    const m = w.metrics || {};
+    log(
+      `Treino ${j.reused ? 'reusado' : 'novo'} ${j.ticker} v${w.version || j.version || '—'} | ` +
+      `MAE=${(m.mae ?? j.mae)?.toFixed?.(4) ?? '—'} ` +
+      `RMSE=${(m.rmse ?? j.rmse)?.toFixed?.(4) ?? '—'} ` +
+      `MAPE=${(m.mape ?? j.mape)?.toFixed?.(2) ?? '—'}% ` +
+      `R²=${(m.r2 ?? j.r2)?.toFixed?.(3) ?? '—'} ` +
+      `ACC=${(((m.accuracy ?? j.accuracy) || 0) * 100).toFixed(1)}%`,
+      'ok'
+    );
+
+    await loadAll();
+  }catch(e){
+    chrono.stop();
+    log(`Treino ERRO: ${e.message}`,'err');
+  }
+}
+
+// ---------- Tickers ----------
+async function fetchTickers(){
+  const r = await fetch('/api/tickers');
+  if(!r.ok) throw new Error(await r.text());
+  return await r.json();
+}
+function setTickerOptions(list, preferred){
+  const sel = document.getElementById('ticker');
+  sel.innerHTML = '';
+  if(!list || !list.length){
+    const opt = document.createElement('option');
+    opt.value = preferred || 'NVDA';
+    opt.textContent = preferred || 'NVDA';
+    sel.appendChild(opt);
+    sel.disabled = false;
+    return;
+  }
+  for(const it of list){
+    const opt = document.createElement('option');
+    opt.value = it.ticker.toUpperCase();
+    const span = it.start && it.end ? ` (${it.start} → ${it.end}, ${it.rows})` : '';
+    opt.textContent = it.ticker.toUpperCase() + span;
+    sel.appendChild(opt);
+  }
+  if(preferred){
+    const v = preferred.toUpperCase();
+    const has = [...sel.options].some(o => o.value === v);
+    if(has) sel.value = v;
+  }
+}
+async function reloadTickers(preferred){
+  try{
+    const j = await fetchTickers();
+    setTickerOptions(j.tickers, preferred);
+  }catch(e){
+    console.error('tickers ERRO', e);
+    setTickerOptions([{ticker: preferred || 'NVDA'}], preferred);
+  }
+}
+
+// ---------- Boot ----------
+(async function boot(){
+  await reloadTickers();
+  await loadAll();
+})();
+</script>
+{% endblock %}

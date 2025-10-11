@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tech Challenge 4</title>
+
+  <!-- CSS locais -->
+  <link rel="stylesheet" href="{{ url_for('static', filename='bootstrap.min.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+
+<body>
+
+      <!-- fundo binário animado, por baixo de tudo -->
+    <div id="hero-layer">
+        <div id="static-binary-grid" aria-hidden="true"></div>
+        <div id="vignette"></div>
+    </div>
+
+      <div class="container home">
+        <section class="hero-content col-sm-12">
+            <div class="hero-text">
+                <h1>Tech Challenge 4 Deep Learning e IA</h1>
+                <h2>Orlando Pardini</h2>
+                <p><a href="/apidocs">Swagger</a> · <a href="/simulate">Simular Data</a> · <a href="/metrics">Metricas (RAM/CPU)</a></p>
+            <div class="canvas-container fade-in">
+                <canvas id="hero-canvas" width="18" height="53" style="width: 973px; height: 1292px;"></canvas>
+            </div>
+        </section>
+    </div>
+        
+    <div class="container-fluid">
+        {% block content %}{% endblock %}
+        </div>
+
+    <div class="home win" data-new-gr-c-s-check-loaded="14.1122.0" data-gr-ext-installed=""></div>
+    <div id="esg_atica"></div>
+    <div id="binary-bg" aria-hidden="true">
+    <pre id="binary-pre"></pre>
+    <pre class="clone"></pre>
+    </div>
+
+    <section id="vscode-hero" aria-hidden="true">
+    <div class="vscode-hero__gradient"></div>
+    <canvas id="vscode-hero-canvas"></canvas>
+    <div id="vscode-hero-grid"></div>
+  </section>
+
+
+	<!-- Setting theme here to avoid FOUC -->
+	<script>
+		function setTheme(themeName) {
+			if (themeName === 'dark') {
+				document.documentElement.removeAttribute('data-theme'); // dark is default, so no data-theme attribute needed
+			}
+
+			if (themeName === 'light') {
+				document.documentElement.setAttribute('data-theme', themeName);
+			}
+			return;
+		}
+
+		// Determine initial theme: user preference or system preference
+		let theme = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+		setTheme(theme); // Apply the initial theme
+
+		// Listen for changes in the system theme preference
+		window.matchMedia('(prefers-color-scheme: dark)').addListener(e => {
+			if (!localStorage.getItem('theme')) { // Only if no user preference is saved
+				setTheme(e.matches ? 'dark' : 'light');
+			}
+		});
+	</script>
+
+	<div id="main">
+		<div class="navbar-fixed-container">
+			<div class="navbar navbar-inverse navbar-fixed-top affix-top" data-spy="affix" data-offset-top="1">
+			</div>
+		</div>		
+		<!-- The body itself should already have a main tag -->
+		<div id="main-content">
+			
+
+
+    <section class="swimlane row">
+        <div class="swimlane-content">
+            <div class="col-sm-5 col-lg-5">
+                <div class="value-prop-intro">
+                    <h2>Outubro, 2025</h2>
+                    <p>aaiggerVS Code predicts your next move as you code. Use the Tab key to accept AI-powered
+                        suggestions right in your editor. It intelligently recommends what to change — and where — based
+                        on the edits you're already makin.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+
+<!-- scripts, sempre no final -->
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<script defer src="{{ url_for('static', filename='index.js') }}"></script>
+</body>
+
+</html>
