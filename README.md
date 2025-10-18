@@ -34,6 +34,24 @@ Este repositório implementa um **pipeline completo de previsão de séries fina
 
 ---
 
+## Execução local
+
+```bash
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+source .venv/bin/activate              # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+export FLASK_APP=wsgi.py               # Windows: set FLASK_APP=wsgi.py
+flask run                              # http://127.0.0.1:5000
+```
+
+- **Swagger**: `http://127.0.0.1:5000/apidocs`
+- **Site**: `http://127.0.0.1:5000/` (gráficos)
+- **Seed/simulação**: `http://127.0.0.1:5000/simulate`
+
+---
+
 ## Arquitetura geral
 
 ```
@@ -221,23 +239,6 @@ README.md
   - Versão completa (`monitoring.py`): middleware de **latência por rota**, **requests em progresso** e contadores por status.
   - Versão simples (`monitoring_simple.py`): **CPU/RAM** via `psutil` — útil em ambientes restritos.
 - Integra com **Grafana** facilmente: adicione o serviço Prometheus e aponte o target.
-
----
-
-## Execução local
-
-```bash
-python -m venv .venv
-source .venv/bin/activate              # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-
-export FLASK_APP=wsgi.py               # Windows: set FLASK_APP=wsgi.py
-flask run                              # http://127.0.0.1:5000
-```
-
-- **Swagger**: `http://127.0.0.1:5000/apidocs`
-- **Site**: `http://127.0.0.1:5000/` (gráficos)
-- **Seed/simulação**: `http://127.0.0.1:5000/simulate`
 
 ---
 
